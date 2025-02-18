@@ -1,5 +1,6 @@
 import os
 import re
+import math  # 新增：用于判断 nan
 from datetime import datetime
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
@@ -22,16 +23,26 @@ def get_exif_data(image_path):
             return {}
 
         return {TAGS.get(tag, tag): value for tag, value in exif_data.items()}
-    except Exception:
+    except Exception as e:
+        print(f"Error in get_exif_data('{image_path}'): {e}")
         return {}
 
 def process_focal_length(focal_length):
     """处理焦段数据"""
     try:
+        # 判断数值是否为 nan
+        if isinstance(focal_length, (float, int)) and math.isnan(focal_length):
+            return None
         if isinstance(focal_length, tuple):
+            # 检查各项是否为 nan
+            if any(isinstance(v, (float, int)) and math.isnan(v) for v in focal_length):
+                return None
+            if focal_length[1] == 0:
+                return None  # 防止除零错误
             return round(float(focal_length[0]) / float(focal_length[1]))
         return round(float(focal_length))
-    except (TypeError, ValueError):
+    except Exception as e:
+        print(f"Error in process_focal_length({focal_length}): {e}")
         return None
 
 def process_iso_value(iso_value):
@@ -44,28 +55,66 @@ def process_iso_value(iso_value):
         
         iso_value = int(iso_value)
         return iso_value if 50 <= iso_value <= 512000 else None
-    except (TypeError, ValueError, IndexError):
+    except Exception as e:
+        print(f"Error in process_iso_value({iso_value}): {e}")
         return None
 
 def process_aperture(aperture):
     """处理光圈数据"""
     try:
+        if isinstance(aperture, (float, int)) and math.isnan(aperture):
+            return None
         if isinstance(aperture, tuple):
+            if any(isinstance(v, (float, int)) and math.isnan(v) for v in aperture):
+                return None
+            if aperture[1] == 0:
+                return None  # 防止除零错误
             return round(float(aperture[0]) / float(aperture[1]), 1)
         return round(float(aperture), 1)
-    except (TypeError, ValueError):
+    except Exception as e:
+        print(f"Error in process_aperture({aperture}): {e}")
         return None
 
 def process_shutter_speed(shutter_speed):
     """处理快门速度数据"""
     try:
+        if isinstance(shutter_speed, (float, int)) and math.isnan(shutter_speed):
+            return None
         if isinstance(shutter_speed, tuple):
+            if any(isinstance(v, (float, int)) and math.isnan(v) for v in shutter_speed):
+                return None
+            if shutter_speed[1] == 0:
+                return None  # 防止除零错误
             speed = float(shutter_speed[0]) / float(shutter_speed[1])
         else:
             speed = float(shutter_speed)
         return round(speed, 4)
-    except (TypeError, ValueError):
+    except Exception as e:
+        print(f"Error in process_shutter_speed({shutter_speed}): {e}")
         return None
+
+def try_parse_date(date_string):
+    """尝试使用多种格式解析日期字符串"""
+    date_formats = [
+        '%Y:%m:%d %H:%M:%S',  # 标准 EXIF 格式
+        '%Y-%m-%d %H:%M:%S',  # 带连字符的格式
+        '%Y%m%d_%H%M%S',      # 紧凑格式
+        '%Y_%m_%d %H:%M:%S',  # 带下划线的格式
+        '%Y%m%d%H%M%S'        # 纯数字格式
+    ]
+    
+    if not date_string or not isinstance(date_string, str):
+        return None
+        
+    # 清理日期字符串
+    date_string = date_string.replace('\x00', '').strip()
+    
+    for fmt in date_formats:
+        try:
+            return datetime.strptime(date_string, fmt)
+        except ValueError:
+            continue
+    return None
 
 def process_folder(folder_path):
     """处理文件夹中的图片并统计数据"""
@@ -104,12 +153,11 @@ def process_folder(folder_path):
 
         # 处理拍摄日期
         if 'DateTimeOriginal' in exif_data:
-            try:
-                dt = datetime.strptime(exif_data['DateTimeOriginal'], '%Y:%m:%d %H:%M:%S')
+            raw_date = exif_data['DateTimeOriginal']
+            dt = try_parse_date(raw_date)
+            if dt:
                 dates[dt.date()] = dates.get(dt.date(), 0) + 1
                 hours[dt.hour] = hours.get(dt.hour, 0) + 1
-            except ValueError:
-                continue
 
         # 处理 ISO 数据
         if 'ISOSpeedRatings' in exif_data:
@@ -120,7 +168,8 @@ def process_folder(folder_path):
                     try:
                         dt = datetime.strptime(exif_data['DateTimeOriginal'], '%Y:%m:%d %H:%M:%S')
                         hourly_settings[dt.hour]['isos'].append(iso_value)
-                    except ValueError:
+                    except ValueError as e:
+                        print(f"Error parsing DateTimeOriginal for ISO in '{image_path}': {e}")
                         pass
 
         # 处理光圈数据
@@ -132,7 +181,8 @@ def process_folder(folder_path):
                     try:
                         dt = datetime.strptime(exif_data['DateTimeOriginal'], '%Y:%m:%d %H:%M:%S')
                         hourly_settings[dt.hour]['apertures'].append(aperture)
-                    except ValueError:
+                    except ValueError as e:
+                        print(f"Error parsing DateTimeOriginal for FNumber in '{image_path}': {e}")
                         pass
 
         # 处理快门速度数据
@@ -144,7 +194,8 @@ def process_folder(folder_path):
                     try:
                         dt = datetime.strptime(exif_data['DateTimeOriginal'], '%Y:%m:%d %H:%M:%S')
                         hourly_settings[dt.hour]['shutter_speeds'].append(shutter_speed)
-                    except ValueError:
+                    except ValueError as e:
+                        print(f"Error parsing DateTimeOriginal for ExposureTime in '{image_path}': {e}")
                         pass
 
     return focal_lengths, dates, hours, iso, apertures, shutter_speeds, hourly_settings
@@ -444,10 +495,13 @@ def analyze_folder(folder_path):
     ), chart_paths
 
 def main():
-    folder_path = input("请输入图片文件夹路径: ")
-    results, chart_paths = analyze_folder(folder_path)
-    if results:
-        print("统计图表已生成在 output 文件夹中！")
+    try:
+        folder_path = input("请输入图片文件夹路径: ")
+        results, chart_paths = analyze_folder(folder_path)
+        if results:
+            print("统计图表已生成在 output 文件夹中！")
+    except Exception as e:
+        print(f"程序运行过程中发生异常: {e}")
 
 if __name__ == "__main__":
     main()
